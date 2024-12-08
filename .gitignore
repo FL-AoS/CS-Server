@@ -1,2 +1,5 @@
 config.toml
 maps/
+bans.txt
+logs/
+game_modes/__pycache__
