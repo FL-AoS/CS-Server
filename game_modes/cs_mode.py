@@ -191,6 +191,8 @@ def apply_script(protocol, connection, config):
 				player.send_chat_warning(message)
 
 		def handle_round_win(self, team):
+			self.game_state = 1
+
 			for player in list(self.players.values()):
 				if player.world_object is None:
 					continue
@@ -209,8 +211,6 @@ def apply_script(protocol, connection, config):
 				MVP = choice(list(team.get_players()))
 				MVP.take_flag()
 				MVP.capture_flag()
-
-			self.game_state = 1
 
 		def handle_round_timeout(self):
 			self.broadcast_chat_status("ROUND TIMEOUT")
@@ -255,6 +255,12 @@ def apply_script(protocol, connection, config):
 
 	class csConnection(connection):
 		start_position = (0,0,0)
+
+		def on_spawn(self, pos):
+			if self.protocol.game_state > 1:
+				self.kill()
+
+			return connection.on_spawn(self, pos)
 
 		def on_team_join(self, team):
 			if team.id != 0 and team.id != 1:
@@ -317,9 +323,15 @@ def apply_script(protocol, connection, config):
 			else:
 				return -1
 
+		def respawn(self):
+			if self.protocol.game_state > 1:
+				return False
+
+			return connection.respawn(self)
+
 		def on_kill(self, killer, _type, nade):
 			if self.protocol.game_state == 2 and self.world_object is not None:
-				self.world_object.dead = 1
+				self.world_object.dead = True
 				self.protocol.handle_death()
 
 			return connection.on_kill(self, killer, _type, nade)
