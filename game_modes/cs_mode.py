@@ -1,15 +1,23 @@
 """
-Requires python 3.10>
+Requires python >3.10
 """
 
 from pyspades.constants import CTF_MODE
 from pyspades.contained import PositionData
+from twisted.internet.reactor import callLater
 from time import time
-from random import randint
+from random import randint, choice
+from math import floor
 import asyncio
 
-PRACTICE_TIME = 30 # SECONDS
+PRACTICE_TIME = 5 # SECONDS
+FREEZE_TIME = 5 # SECONDS
 MINIMUM_PLAYERS = 2
+
+ROUND_TIME = 120 # SECONDS
+ROUND_END_TIME = 10
+
+WIN_ROUNDS = 13
 
 SPAWN_RANGE = 5 # x+5 and x-5 = 10
 
@@ -18,34 +26,81 @@ MAX_FIND_SPAWN_ATTEMPS = 10
 
 async def game_loop(protocol):
 	practice_countdown = PRACTICE_TIME
-	last_message = 0
+	freeze_time_countdown = FREEZE_TIME
+	round_time_countdown = ROUND_TIME
+	last_ts = 0
 
 	while True:
 		try:
 			match protocol.game_state:
 				case 0:
-					if not protocol.required_players() and time()-last_message>=WAITING_PLAYER_MESSAGE_INTERVAL:
+					if not protocol.required_players() and time()-last_ts>=WAITING_PLAYER_MESSAGE_INTERVAL:
 						protocol.broadcast_chat_status("{}/{}".format(protocol.blue_team.count()+protocol.green_team.count(), MINIMUM_PLAYERS))
 						protocol.broadcast_chat_status("Waiting for players...\n")
-						last_message = time()
+						last_ts = time()
 
 						if practice_countdown != PRACTICE_TIME:
 							protocol.broadcast_chat("Not enough players to start, waiting more players...")
-						practice_countdown = PRACTICE_TIME
+						practice_countdown = PRACTICE_TIME+1
 
-					elif protocol.required_players() and time()-last_message >= 1:
-						last_message = time()
+					elif protocol.required_players() and time()-last_ts >= 1:
+						last_ts = time()
 						practice_countdown -= 1
 
-						if practice_countdown > 5 and not practice_countdown%10:
+						if practice_countdown > 10 and not practice_countdown%10:
 							protocol.broadcast_chat_status("WARM UP")
 							protocol.broadcast_chat_status("Game starting in: {} seconds".format((practice_countdown+PRACTICE_TIME)-PRACTICE_TIME))
-						elif practice_countdown > 0 practice_countdown <= 5:
+						elif practice_countdown > 0 and practice_countdown <= 10:
 							protocol.broadcast_chat_status("WARM UP")
 							protocol.broadcast_chat_status("Game starting in: {} seconds".format((practice_countdown+PRACTICE_TIME)-PRACTICE_TIME))
 						elif practice_countdown <= 0:
+							freeze_time_countdown = FREEZE_TIME
 							protocol.broadcast_chat("GAME STARTING!")
 							protocol.game_state = 1
+							last_ts = 0
+				case 1:
+					if time()-last_ts >= 1:
+						freeze_time_countdown -= 1
+						last_ts = time()
+
+						protocol.broadcast_chat_status("FREEZE TIME")
+						protocol.broadcast_chat_status("{} seconds".format((freeze_time_countdown+FREEZE_TIME)-FREEZE_TIME))
+
+						if freeze_time_countdown <= 0:
+							protocol.game_state = 2
+							round_time_countdown = ROUND_TIME+1
+							last_ts = 0
+
+							blue_team_p = protocol.blue_team.score
+							green_team_p = protocol.green_team.score
+
+							protocol.broadcast_chat_status("ROUND STARTED")
+							protocol.broadcast_chat_status("Blue {} - {} Green".format(blue_team_p, green_team_p))
+				case 2:
+					if time()-last_ts >= 1:
+						last_ts = time()
+						round_time_countdown -= 1
+
+						secs = str(round_time_countdown%60)
+						if len(secs) < 2:
+							secs = "0"+secs
+
+						mins = str(floor(round_time_countdown/60))
+						if len(mins) < 2:
+							mins = "0"+mins
+
+						if round_time_countdown > 30 and not round_time_countdown%30:
+							protocol.broadcast_chat_status("ROUND TIME")
+							protocol.broadcast_chat_status(mins+":"+secs)
+						elif round_time_countdown > 0 and round_time_countdown < 30:
+							protocol.broadcast_chat_status("ROUND TIME")
+							protocol.broadcast_chat_status(mins+":"+secs)
+						elif round_time_countdown <= 0:
+							protocol.game_state = 3
+							protocol.handle_round_timeout()
+				case 3:
+					freeze_time_countdown = FREEZE_TIME
+					last_ts = 0
 
 			player_list = list(protocol.players.values())
 			for player in player_list:
@@ -57,6 +112,10 @@ async def game_loop(protocol):
 
 				if player.team.id != 0 and player.team.id != 1:
 					continue
+
+				match protocol.game_state:
+					case 1:
+						player.set_location(player.start_position)
 
 		except Exception as e:
 			print(e)
@@ -73,6 +132,7 @@ def apply_script(protocol, connection, config):
 		0 = warm up
 		1 = freeze time
 		2 = game running
+		3 = round end
 		"""
 		game_state = -1
 
@@ -119,6 +179,80 @@ def apply_script(protocol, connection, config):
 
 				player.send_chat_status(message)
 
+		def broadcast_chat_warning(self, message):
+			player_l = list(self.players.values())
+			for player in player_l:
+				if player is None:
+					continue
+
+				if player.world_object is None:
+					continue
+
+				player.send_chat_warning(message)
+
+		def handle_round_win(self, team):
+			for player in list(self.players.values()):
+				if player.world_object is None:
+					continue
+				if player.team.spectator:
+					continue
+
+				if player.world_object.dead:
+					player.spawn((0,0,0))
+
+				player.refill()
+
+			if team is None:
+				self.blue_team.score += 1
+				team = self.blue_team
+			else:
+				MVP = choice(list(team.get_players()))
+				MVP.take_flag()
+				MVP.capture_flag()
+
+			self.game_state = 1
+
+		def handle_round_timeout(self):
+			self.broadcast_chat_status("ROUND TIMEOUT")
+
+			if self.blue_team.count() > 0:
+				self.broadcast_chat_warning("CT Won!")
+				callLater(ROUND_END_TIME, self.handle_round_win, self.blue_team)
+
+			elif self.green_team.count() > 0:
+				self.broadcast_chat_warning("TR Won!")
+				callLater(ROUND_END_TIME, self.handle_round_win, self.green_team)
+
+			else:
+				callLater(ROUND_END_TIME, self.handle_round_win, None)
+
+		def handle_death(self):
+			if self.game_state != 2:
+				return
+
+			ct_players = list(self.blue_team.get_players())
+			tr_players = list(self.green_team.get_players())
+
+			ct_dead_team = 0
+			for ct in ct_players:
+				if ct.world_object is None or ct.world_object.dead:
+					ct_dead_team += 1
+
+			if ct_dead_team == len(ct_players):
+				self.game_state = 3
+				self.broadcast_chat_warning("TR Won!")
+				callLater(ROUND_END_TIME, self.handle_round_win, self.green_team)
+
+			tr_dead_team = 0
+			for tr in tr_players:
+				if tr.world_object is None or tr.world_object.dead:
+					tr_dead_team += 1
+
+			if tr_dead_team == len(tr_players):
+				self.game_state = 3
+				self.broadcast_chat_warning("CT Won!")
+				callLater(ROUND_END_TIME, self.handle_round_win, self.blue_team)
+
 	class csConnection(connection):
 		start_position = (0,0,0)
 
@@ -151,31 +285,43 @@ def apply_script(protocol, connection, config):
 				r_y = randint(y-SPAWN_RANGE, y+SPAWN_RANGE)
 				r_z = self.protocol.map.get_z(x,y,z-3)
 
-				print(r_x, r_y, r_z, r_z-(z-3))
-
 				if r_z-(z-3) > 8:
 					continue
 
-				if self.protocol.map.get_solid(r_x, r_y, r_z-3) or self.protocol.map.get_solid(r_x, r_y, r_z-2) or self.protocol.map.get_solid(r_x, r_y, r_z-1):
-					continue
+				for pos in self.protocol.pos_table:
+					if self.is_location_free(r_x + pos[0], r_y + pos[1], r_z + pos[2]):
+						if not (r_x + pos[0] > x-SPAWN_RANGE and r_x + pos[0] < x+SPAWN_RANGE):
+							continue
 
-				break
+						if not (r_y + pos[1] > y-SPAWN_RANGE and r_y + pos[1] < y+SPAWN_RANGE):
+							continue
+
+						r_x = r_x + pos[0]
+						r_y = r_y + pos[1]
+						r_z = self.protocol.map.get_z(r_x, r_y, r_z)
+
+				if (r_x > x-SPAWN_RANGE and r_x < x+SPAWN_RANGE) and (r_y > y-SPAWN_RANGE and r_y < y+SPAWN_RANGE):
+					break
 
 			# magic number for not glitching
-			self.start_position = (r_x, r_y, r_z-2.27)
+			self.start_position = (r_x, r_y, r_z-2)
 
 		def on_spawn_location(self, pos):
 			self.find_spawn()
 
 			return self.start_position
 
-		def set_position(self, x,y,z):
-			pos_p = PositionData()
-			pos_p.x = x
-			pos_p.y = y
-			pos_p.z = z
+		def get_respawn_time(self):
+			if self.protocol.game_state < 2:
+				return 0
+			else:
+				return -1
 
-			self.send_contained(pos_p)
-			self.world_object.set_position(x,y,z)
+		def on_kill(self, killer, _type, nade):
+			if self.protocol.game_state == 2 and self.world_object is not None:
+				self.world_object.dead = 1
+				self.protocol.handle_death()
+
+			return connection.on_kill(self, killer, _type, nade)
 
 	return csProtocol, csConnection
