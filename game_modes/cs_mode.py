@@ -59,6 +59,9 @@ async def game_loop(protocol):
 							protocol.game_state = 1
 							last_ts = 0
 				case 1:
+					if protocol.green_team.flag.player is None:
+						choice(list(protocol.green_team.get_players())).take_flag()
+
 					if time()-last_ts >= 1:
 						freeze_time_countdown -= 1
 						last_ts = time()
@@ -102,6 +105,7 @@ async def game_loop(protocol):
 					freeze_time_countdown = FREEZE_TIME
 					last_ts = 0
 
+
 			player_list = list(protocol.players.values())
 			for player in player_list:
 				if player is None:
@@ -116,6 +120,26 @@ async def game_loop(protocol):
 				match protocol.game_state:
 					case 1:
 						player.set_location(player.start_position)
+					case 2:
+						if player.team.other.flag.player is player:
+							x,y,z = player.world_object.position.get()
+
+							for bomb in protocol.bomb_sites:
+								bx_min, bx_max = bomb[0]
+								if not (x >= bx_min and x <= bx_max):
+									continue
+
+								by_min, by_max = bomb[1]
+								if not (y >= by_min and y <= by_max):
+									continue
+
+								bz_min, bz_max = bomb[2]
+								if not (z >= bz_min and z <= bz_max):
+									continue
+
+								if not protocol.planting and time()-protocol.bomb_message_ts>=2:
+									protocol.bomb_message_ts = time()
+									player.send_chat("Plant hitting the ground with spade")
 
 		except Exception as e:
 			print(e)
@@ -133,6 +157,7 @@ def apply_script(protocol, connection, config):
 		1 = freeze time
 		2 = game running
 		3 = round end
+		4 = planted
 		"""
 		game_state = -1
 
@@ -140,6 +165,10 @@ def apply_script(protocol, connection, config):
 
 		ct_spawn = None
 		t_spawn = None
+		bomb_sites = []
+
+		bomb_message_ts = 0
+		planting = False
 
 		def __init__(self, *args, **kwargs):
 			if self.game_loop is None:
@@ -147,12 +176,19 @@ def apply_script(protocol, connection, config):
 
 			return protocol.__init__(self, *args, **kwargs)
 
+		def on_flag_spawn(self, x,y,z,flag,entity_id):
+			return (0,0,0)
+		def on_base_spawn(self,x,y,z,base,entity_id):
+			return (0,0,0)
+
 		def on_map_change(self, _map):
 			self.game_state = -1
 
 			ext = self.map_info.extensions
 			self.ct_spawn = self.map_info.extensions["ct_spawn"]
 			self.t_spawn = self.map_info.extensions["t_spawn"]
+
+			self.bomb_sites = self.map_info.extensions["bomb_sites"]
 
 			return protocol.on_map_change(self, _map)
 
@@ -335,5 +371,12 @@ def apply_script(protocol, connection, config):
 				self.protocol.handle_death()
 
 			return connection.on_kill(self, killer, _type, nade)
+
+		def on_disconnect(self):
+			if self.protocol.game_state == 2:
+				self.world_object.dead = True
+				self.protocol.handle_death()
+
+			return connection.on_disconnect(self)
 
 	return csProtocol, csConnection
