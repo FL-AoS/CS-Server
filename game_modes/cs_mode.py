@@ -2,8 +2,9 @@
 Requires python >3.10
 """
 
-from pyspades.constants import CTF_MODE
+from pyspades.constants import CTF_MODE, SPADE_TOOL
 from pyspades.contained import PositionData
+from pyspades.collision import distance_3d
 from twisted.internet.reactor import callLater
 from time import time
 from random import randint, choice
@@ -21,6 +22,9 @@ WIN_ROUNDS = 13
 
 SPAWN_RANGE = 5 # x+5 and x-5 = 10
 
+BOMB_CODE = "7355608"
+BOMB_PLANT_TIME = 3.5
+
 WAITING_PLAYER_MESSAGE_INTERVAL = 5
 MAX_FIND_SPAWN_ATTEMPS = 10
 
@@ -29,6 +33,9 @@ async def game_loop(protocol):
 	freeze_time_countdown = FREEZE_TIME
 	round_time_countdown = ROUND_TIME
 	last_ts = 0
+
+	bomb_message_ts = 0
+	bomb_plant_code_index = 0
 
 	while True:
 		try:
@@ -124,22 +131,30 @@ async def game_loop(protocol):
 						if player.team.other.flag.player is player:
 							x,y,z = player.world_object.position.get()
 
-							for bomb in protocol.bomb_sites:
-								bx_min, bx_max = bomb[0]
-								if not (x >= bx_min and x <= bx_max):
-									continue
+							if protocol.planting is None:
+								for bomb in protocol.bomb_sites:
+									bx_min, bx_max = bomb[0]
+									by_min, by_max = bomb[1]
+									bz_min, bz_max = bomb[2]
 
-								by_min, by_max = bomb[1]
-								if not (y >= by_min and y <= by_max):
-									continue
+									if (x >= bx_min and x <= bx_max) and (y >= by_min and y <= by_max) and (z >= bz_min and z <= bz_max):
+										if protocol.planting is None and time()-bomb_message_ts>=2:
+											bomb_message_ts = time()
+											player.send_chat("Plant hitting the ground with spade")
+							elif protocol.planting is player:
+								if time()-protocol.planting_start_ts > BOMB_PLANT_TIME:
+									protocol.game_state = 4
+									player.drop_flag()
+									player.team.other.flag.set(*protocol.planting_pos)
+									player.team.other.flag.update()
 
-								bz_min, bz_max = bomb[2]
-								if not (z >= bz_min and z <= bz_max):
-									continue
+									protocol.broadcast_chat_error("BOMB HAS BEEN PLANTED!")
 
-								if not protocol.planting and time()-protocol.bomb_message_ts>=2:
-									protocol.bomb_message_ts = time()
-									player.send_chat("Plant hitting the ground with spade")
+								if time()-bomb_message_ts >= BOMB_PLANT_TIME/len(BOMB_CODE) and bomb_plant_code_index < len(BOMB_CODE):
+									bomb_message_ts = time()
+
+									protocol.broadcast_chat_warning(BOMB_CODE[:bomb_plant_code_index])
+									bomb_plant_code_index += 1
 
 		except Exception as e:
 			print(e)
@@ -167,8 +182,9 @@ def apply_script(protocol, connection, config):
 		t_spawn = None
 		bomb_sites = []
 
-		bomb_message_ts = 0
-		planting = False
+		planting = None
+		planting_pos = None
+		planting_start_ts = 0
 
 		def __init__(self, *args, **kwargs):
 			if self.game_loop is None:
@@ -225,6 +241,17 @@ def apply_script(protocol, connection, config):
 					continue
 
 				player.send_chat_warning(message)
+
+		def broadcast_chat_error(self, message):
+			player_l = list(self.players.values())
+			for player in player_l:
+				if player is None:
+					continue
+
+				if player.world_object is None:
+					continue
+
+				player.send_chat_error(message)
 
 		def handle_round_win(self, team):
 			self.game_state = 1
@@ -348,6 +375,12 @@ def apply_script(protocol, connection, config):
 			# magic number for not glitching
 			self.start_position = (r_x, r_y, r_z-2)
 
+		def stop_bomb_planting(self):
+			self.protocol.planting = None
+			self.protocol.planting_pos = None
+
+			self.send_chat("Stopped planting the bomb")
+
 		def on_spawn_location(self, pos):
 			self.find_spawn()
 
@@ -365,6 +398,12 @@ def apply_script(protocol, connection, config):
 
 			return connection.respawn(self)
 
+		def on_flag_take(self):
+			if self.protocol.game_state != 2:
+				return False
+
+			return connection.on_flag_take(self)
+
 		def on_kill(self, killer, _type, nade):
 			if self.protocol.game_state == 2 and self.world_object is not None:
 				self.world_object.dead = True
@@ -378,5 +417,42 @@ def apply_script(protocol, connection, config):
 				self.protocol.handle_death()
 
 			return connection.on_disconnect(self)
+
+		def on_position_update(self):
+			if self.protocol.planting is self and self.world_object is not None:
+				if distance_3d(self.world_object.position.get(), self.protocol.planting_pos) > 1:
+					self.stop_bomb_planting()
+
+			return connection.on_position_update(self)
+
+		def on_tool_changed(self, tool):
+			if self.protocol.planting is self:
+				self.stop_bomb_planting()
+
+			return connection.on_tool_changed(self, tool)
+
+		def on_shoot_set(self, shoot):
+			if self.world_object is None:
+				return connection.on_shoot_set(self, shoot)
+
+			if not shoot and self.protocol.planting is self:
+				self.stop_bomb_planting()
+
+			if shoot and self.tool == SPADE_TOOL:
+				x,y,z = self.world_object.position.get()
+				for bomb in self.protocol.bomb_sites:
+					bx_min, bx_max = bomb[0]
+					by_min, by_max = bomb[1]
+					bz_min, bz_max = bomb[2]
+
+					if (x >= bx_min and x <= bx_max) and (y >= by_min and y <= by_max) and (z >= bz_min and z <= bz_max):
+						self.protocol.planting = self
+						self.protocol.planting_pos = (x,y,z)
+						self.protocol.planting_start_ts = time()
+
+						self.send_chat("Planting the bomb...")
+
+			return connection.on_shoot_set(self, shoot)
+
 
 	return csProtocol, csConnection
