@@ -153,7 +153,7 @@ async def game_loop(protocol):
 								if time()-bomb_message_ts >= BOMB_PLANT_TIME/len(BOMB_CODE) and bomb_plant_code_index < len(BOMB_CODE):
 									bomb_message_ts = time()
 
-									protocol.broadcast_chat_warning(BOMB_CODE[:bomb_plant_code_index])
+									player.send_chat_warning(BOMB_CODE[:bomb_plant_code_index])
 									bomb_plant_code_index += 1
 
 		except Exception as e:
