@@ -24,6 +24,8 @@ SPAWN_RANGE = 5 # x+5 and x-5 = 10
 
 BOMB_CODE = "7355608"
 BOMB_PLANT_TIME = 3.5
+BOMB_EXPLOSION_TIME = 40
+BOMB_BEEP_DISTANCE = 40
 
 WAITING_PLAYER_MESSAGE_INTERVAL = 5
 MAX_FIND_SPAWN_ATTEMPS = 10
@@ -112,6 +114,26 @@ async def game_loop(protocol):
 					freeze_time_countdown = FREEZE_TIME
 					last_ts = 0
 
+				case 4:
+					boom_time_left = floor(BOMB_EXPLOSION_TIME-(time()-protocol.planted_ts))
+
+					if time()-bomb_message_ts >= 1: #TODO MAKE IT MORE CS2 LIKE, USING A GRAPH
+						bomb_message_ts = time()
+
+						if not boom_time_left%5 and boom_time_left>20:
+							protocol.beep_near()
+						elif not boom_time_left%2 and boom_time_left>8 and boom_time_left<20:
+							protocol.beep_near()
+						elif boom_time_left<=8:
+							protocol.beep_near(True)
+
+					if time()-protocol.planted_ts >= BOMB_EXPLOSION_TIME:
+						protocol.game_state = 3
+						protocol.broadcast_chat_warning("TR Won!")
+						callLater(ROUND_END_TIME, protocol.handle_round_win, protocol.green_team)
+
+						protocol.broadcast_chat_error("KABOOM")
+
 
 			player_list = list(protocol.players.values())
 			for player in player_list:
@@ -140,10 +162,16 @@ async def game_loop(protocol):
 									if (x >= bx_min and x <= bx_max) and (y >= by_min and y <= by_max) and (z >= bz_min and z <= bz_max):
 										if protocol.planting is None and time()-bomb_message_ts>=2:
 											bomb_message_ts = time()
+											bomb_plant_code_index = 0
 											player.send_chat("Plant hitting the ground with spade")
+
 							elif protocol.planting is player:
 								if time()-protocol.planting_start_ts > BOMB_PLANT_TIME:
 									protocol.game_state = 4
+									protocol.planted_ts = time()
+
+									protocol.planting = None
+
 									player.drop_flag()
 									player.team.other.flag.set(*protocol.planting_pos)
 									player.team.other.flag.update()
@@ -185,6 +213,8 @@ def apply_script(protocol, connection, config):
 		planting = None
 		planting_pos = None
 		planting_start_ts = 0
+
+		planted_ts = 0
 
 		def __init__(self, *args, **kwargs):
 			if self.game_loop is None:
@@ -316,6 +346,23 @@ def apply_script(protocol, connection, config):
 				self.broadcast_chat_warning("CT Won!")
 				callLater(ROUND_END_TIME, self.handle_round_win, self.blue_team)
 
+		def beep_near(self, beep_hard=False):
+			for player in list(self.players.values()):
+				if player.world_object is None:
+					return
+
+				b_x, b_y, b_z = self.planting_pos
+				x, y, z = player.world_object.position.get()
+
+				dx = abs(b_x-x)
+				dy = abs(b_y-y)
+
+				if dx < BOMB_BEEP_DISTANCE and dy < BOMB_BEEP_DISTANCE:
+					if beep_hard:
+						player.send_chat_error("BEEP")
+					else:
+						player.send_chat_warning("BEEP")
+
 	class csConnection(connection):
 		start_position = (0,0,0)
 
@@ -399,7 +446,7 @@ def apply_script(protocol, connection, config):
 			return connection.respawn(self)
 
 		def on_flag_take(self):
-			if self.protocol.game_state != 2:
+			if self.protocol.game_state != 2 and self.protocol.game_state != 1:
 				return False
 
 			return connection.on_flag_take(self)
@@ -419,20 +466,20 @@ def apply_script(protocol, connection, config):
 			return connection.on_disconnect(self)
 
 		def on_position_update(self):
-			if self.protocol.planting is self and self.world_object is not None:
+			if self.protocol.planting is self and self.world_object is not None and self.protocol.game_state == 2:
 				if distance_3d(self.world_object.position.get(), self.protocol.planting_pos) > 1:
 					self.stop_bomb_planting()
 
 			return connection.on_position_update(self)
 
 		def on_tool_changed(self, tool):
-			if self.protocol.planting is self:
+			if self.protocol.planting is self and self.protocol.game_state == 2:
 				self.stop_bomb_planting()
 
 			return connection.on_tool_changed(self, tool)
 
 		def on_shoot_set(self, shoot):
-			if self.world_object is None:
+			if self.world_object is None or self.protocol.game_state != 2:
 				return connection.on_shoot_set(self, shoot)
 
 			if not shoot and self.protocol.planting is self:
