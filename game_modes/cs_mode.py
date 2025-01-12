@@ -27,6 +27,9 @@ BOMB_PLANT_TIME = 3.5
 BOMB_EXPLOSION_TIME = 40
 BOMB_BEEP_DISTANCE = 40
 
+BOMB_DEFUSE_WO_KIT = 10
+BOMB_DEFUSE_W_KIT = 5
+
 WAITING_PLAYER_MESSAGE_INTERVAL = 5
 MAX_FIND_SPAWN_ATTEMPS = 10
 
@@ -38,6 +41,7 @@ async def game_loop(protocol):
 
 	bomb_message_ts = 0
 	bomb_plant_code_index = 0
+	defuse_message_ts = 0
 
 	while True:
 		try:
@@ -146,13 +150,13 @@ async def game_loop(protocol):
 				if player.team.id != 0 and player.team.id != 1:
 					continue
 
+				x,y,z = player.world_object.position.get()
+
 				match protocol.game_state:
 					case 1:
 						player.set_location(player.start_position)
 					case 2:
 						if player.team.other.flag.player is player:
-							x,y,z = player.world_object.position.get()
-
 							if protocol.planting is None:
 								for bomb in protocol.bomb_sites:
 									bx_min, bx_max = bomb[0]
@@ -160,7 +164,7 @@ async def game_loop(protocol):
 									bz_min, bz_max = bomb[2]
 
 									if (x >= bx_min and x <= bx_max) and (y >= by_min and y <= by_max) and (z >= bz_min and z <= bz_max):
-										if protocol.planting is None and time()-bomb_message_ts>=2:
+										if time()-bomb_message_ts>=2:
 											bomb_message_ts = time()
 											bomb_plant_code_index = 0
 											player.send_chat("Plant hitting the ground with spade")
@@ -171,6 +175,7 @@ async def game_loop(protocol):
 									protocol.planted_ts = time()
 
 									protocol.planting = None
+									bomb_plant_code_index = 0
 
 									player.drop_flag()
 									player.team.other.flag.set(*protocol.planting_pos)
@@ -183,6 +188,30 @@ async def game_loop(protocol):
 
 									player.send_chat_warning(BOMB_CODE[:bomb_plant_code_index])
 									bomb_plant_code_index += 1
+					case 4:
+						if protocol.defusing is None and player.team.id == protocol.blue_team.id:
+							if time()-defuse_message_ts>=2 and distance_3d((x,y,z), protocol.planting_pos) <= 1:
+								defuse_message_ts = time()
+								bomb_plant_code_index = 0
+								player.send_chat("Defuse hitting the ground with spade")
+
+						elif protocol.defusing is player:
+							# by default lets use with kit, when we implement the shop, we change it
+							defuse_t = BOMB_DEFUSE_W_KIT
+
+							if time()-protocol.defusing_start_ts > defuse_t:
+								protocol.game_state = 3
+
+								protocol.defusing = None
+								protocol.broadcast_chat_error("BOMB HAS BEEN DEFUSED!")
+
+								callLater(ROUND_END_TIME, protocol.handle_round_win, protocol.blue_team)
+
+							if time()-defuse_message_ts >= defuse_t/len(BOMB_CODE) and bomb_plant_code_index < len(BOMB_CODE):
+								defuse_message_ts = time()
+
+								player.send_chat_warning(BOMB_CODE[:bomb_plant_code_index].ljust(len(BOMB_CODE), "*"))
+								bomb_plant_code_index += 1
 
 		except Exception as e:
 			print(e)
@@ -213,6 +242,9 @@ def apply_script(protocol, connection, config):
 		planting = None
 		planting_pos = None
 		planting_start_ts = 0
+
+		defusing = None
+		defusing_start_ts = 0
 
 		planted_ts = 0
 
@@ -428,6 +460,11 @@ def apply_script(protocol, connection, config):
 
 			self.send_chat("Stopped planting the bomb")
 
+		def stop_bomb_defusing(self):
+			self.protocol.defusing = None
+
+			self.send_chat("Stopped defusing the bomb")
+
 		def on_spawn_location(self, pos):
 			self.find_spawn()
 
@@ -466,9 +503,14 @@ def apply_script(protocol, connection, config):
 			return connection.on_disconnect(self)
 
 		def on_position_update(self):
-			if self.protocol.planting is self and self.world_object is not None and self.protocol.game_state == 2:
-				if distance_3d(self.world_object.position.get(), self.protocol.planting_pos) > 1:
-					self.stop_bomb_planting()
+			if self.world_object is not None:
+				if self.protocol.planting is self and self.protocol.game_state == 2:
+					if distance_3d(self.world_object.position.get(), self.protocol.planting_pos) > 1:
+						self.stop_bomb_planting()
+
+				if self.protocol.defusing is self and self.protocol.game_state == 4:
+					if distance_3d(self.world_object.position.get(), self.protocol.planting_pos) > 1:
+						self.stop_bomb_defusing()
 
 			return connection.on_position_update(self)
 
@@ -476,28 +518,44 @@ def apply_script(protocol, connection, config):
 			if self.protocol.planting is self and self.protocol.game_state == 2:
 				self.stop_bomb_planting()
 
+			if self.protocol.defusing is self and self.protocol.game_state == 4:
+				self.stop_bomb_defusing()
+
 			return connection.on_tool_changed(self, tool)
 
 		def on_shoot_set(self, shoot):
-			if self.world_object is None or self.protocol.game_state != 2:
+			if self.world_object is None or (self.protocol.game_state != 2 and self.protocol.game_state != 4):
 				return connection.on_shoot_set(self, shoot)
 
-			if not shoot and self.protocol.planting is self:
-				self.stop_bomb_planting()
+			if not shoot:
+				if self.protocol.planting is self:
+					self.stop_bomb_planting()
+
+				if self.protocol.defusing is self:
+					self.stop_bomb_defusing()
 
 			if shoot and self.tool == SPADE_TOOL:
 				x,y,z = self.world_object.position.get()
-				for bomb in self.protocol.bomb_sites:
-					bx_min, bx_max = bomb[0]
-					by_min, by_max = bomb[1]
-					bz_min, bz_max = bomb[2]
 
-					if (x >= bx_min and x <= bx_max) and (y >= by_min and y <= by_max) and (z >= bz_min and z <= bz_max):
-						self.protocol.planting = self
-						self.protocol.planting_pos = (x,y,z)
-						self.protocol.planting_start_ts = time()
+				if self.protocol.game_state == 2 and self.team.id == self.protocol.green_team.id and self.team.other.flag.player is self:
+					for bomb in self.protocol.bomb_sites:
+						bx_min, bx_max = bomb[0]
+						by_min, by_max = bomb[1]
+						bz_min, bz_max = bomb[2]
 
-						self.send_chat("Planting the bomb...")
+						if (x >= bx_min and x <= bx_max) and (y >= by_min and y <= by_max) and (z >= bz_min and z <= bz_max):
+							self.protocol.planting = self
+							self.protocol.planting_pos = (x,y,z)
+							self.protocol.planting_start_ts = time()
+
+							self.send_chat("Planting the bomb...")
+
+				if self.protocol.game_state == 4 and self.team.id == self.protocol.blue_team.id and self.protocol.defusing is None:
+					if distance_3d(self.world_object.position.get(), self.protocol.planting_pos) <= 1:
+						self.protocol.defusing = self
+						self.protocol.defusing_start_ts = time()
+
+						self.send_chat("Defusing the bomb...")
 
 			return connection.on_shoot_set(self, shoot)
 
