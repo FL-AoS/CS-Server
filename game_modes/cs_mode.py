@@ -72,6 +72,10 @@ async def game_loop(protocol):
 							protocol.game_state = 1
 							last_ts = 0
 				case 1:
+					if not protocol.required_players():
+						protocol.game_state = 0
+						continue
+
 					if protocol.green_team.flag.player is None:
 						choice(list(protocol.green_team.get_players())).take_flag()
 
