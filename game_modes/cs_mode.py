@@ -265,6 +265,7 @@ def apply_script(protocol, connection, config):
 
 		def on_map_change(self, _map):
 			self.game_state = -1
+			self.building = False
 
 			ext = self.map_info.extensions
 			self.ct_spawn = self.map_info.extensions["ct_spawn"]
@@ -421,6 +422,12 @@ def apply_script(protocol, connection, config):
 			self.protocol.game_state = 0	
 
 			return connection.on_team_join(self, team)
+
+		def on_fall(self, dmg):
+			if self.protocol.game_state == 1:
+				return False
+
+			return connection.on_fall(self, dmg)
 
 		def find_spawn(self):
 			x,y,z = self.protocol.ct_spawn
