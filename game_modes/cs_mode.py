@@ -352,7 +352,7 @@ def apply_script(protocol, connection, config):
 				callLater(ROUND_END_TIME, self.handle_round_win, None)
 
 		def handle_death(self):
-			if self.game_state != 2:
+			if self.game_state != 2 and self.game_state != 4:
 				return
 
 			ct_players = list(self.blue_team.get_players())
@@ -367,6 +367,9 @@ def apply_script(protocol, connection, config):
 				self.game_state = 3
 				self.broadcast_chat_warning("TR Won!")
 				callLater(ROUND_END_TIME, self.handle_round_win, self.green_team)
+
+			if self.game_state == 4:
+				return
 
 			tr_dead_team = 0
 			for tr in tr_players:
@@ -489,14 +492,14 @@ def apply_script(protocol, connection, config):
 			return connection.on_flag_take(self)
 
 		def on_kill(self, killer, _type, nade):
-			if self.protocol.game_state == 2 and self.world_object is not None:
+			if self.protocol.game_state == 2 or self.protocol.game_state == 4 and self.world_object is not None:
 				self.world_object.dead = True
 				self.protocol.handle_death()
 
 			return connection.on_kill(self, killer, _type, nade)
 
 		def on_disconnect(self):
-			if self.protocol.game_state == 2:
+			if self.protocol.game_state == 2 or self.protocol.game_state == 4:
 				self.world_object.dead = True
 				self.protocol.handle_death()
 
