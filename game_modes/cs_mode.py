@@ -378,15 +378,20 @@ def apply_script(protocol, connection, config):
 				self.broadcast_chat_warning("TR Won!")
 				callLater(ROUND_END_TIME, self.handle_round_win, self.green_team)
 
-			if self.game_state == 4:
-				return
-
 			tr_dead_team = 0
 			for tr in tr_players:
 				if tr.world_object is None or tr.world_object.dead:
 					tr_dead_team += 1
 
 			if tr_dead_team == len(tr_players):
+				if self.game_state == 4:
+					for player in tr_players:
+						if player.world_object is None:
+							continue
+
+						player.set_location(self.planting_pos)
+					return
+
 				self.game_state = 3
 				self.broadcast_chat_warning("CT Won!")
 				callLater(ROUND_END_TIME, self.handle_round_win, self.blue_team)
