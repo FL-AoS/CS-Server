@@ -2,13 +2,14 @@
 Requires python >3.10
 """
 
-from pyspades.constants import CTF_MODE, SPADE_TOOL
-from pyspades.contained import PositionData
+from pyspades.constants import CTF_MODE, SPADE_TOOL, GRENADE_KILL
+from pyspades.contained import PositionData, BlockAction, GrenadePacket
 from pyspades.collision import distance_3d
+from piqueserver.commands import command
 from twisted.internet.reactor import callLater
 from time import time
 from random import randint, choice
-from math import floor
+from math import floor, cos, sin
 import asyncio
 
 PRACTICE_TIME = 5 # SECONDS
@@ -26,6 +27,9 @@ BOMB_CODE = "7355608"
 BOMB_PLANT_TIME = 3.5
 BOMB_EXPLOSION_TIME = 40
 BOMB_BEEP_DISTANCE = 40
+BOMB_EXPLOSION_RADIUS_INTERVAL = [3, 10, 20, 30]
+CENTRAL_EXPLOSION_DAMAGE = 250
+MAX_BOMB_DAMAGE_DISTANCE = 75
 
 BOMB_DEFUSE_WO_KIT = 10
 BOMB_DEFUSE_W_KIT = 5
@@ -140,6 +144,7 @@ async def game_loop(protocol):
 						protocol.broadcast_chat_warning("TR Won!")
 						callLater(ROUND_END_TIME, protocol.handle_round_win, protocol.green_team)
 
+						protocol.explode_bomb()
 						protocol.broadcast_chat_error("KABOOM")
 
 
@@ -402,6 +407,42 @@ def apply_script(protocol, connection, config):
 						player.send_chat_error("BEEP")
 					else:
 						player.send_chat_warning("BEEP")
+
+		def explode_bomb(self):
+			x,y,z = self.planting_pos
+
+			for radius in BOMB_EXPLOSION_RADIUS_INTERVAL:
+				for i in range(360):
+					if i % 5:
+						continue
+
+					cx = cos(i)*radius+x
+					cy = sin(i)*radius+y
+					cz = self.map.get_z(cx, cy, z)-4
+
+					gp = GrenadePacket()
+					gp.position = (cx, cy, cz)
+					gp.velocity = (0,0,0)
+					gp.value = 0
+
+					callLater(i*0.01, self.broadcast_contained, gp)
+
+			
+			for player in list(self.players.values()):
+				if player.world_object is None or (player.team.id != 0 and player.team.id != 1):
+					continue
+
+				if player.world_object.dead:
+					continue
+
+
+				dist = distance_3d(self.planting_pos, player.world_object.position.get())
+
+				if dist >= MAX_BOMB_DAMAGE_DISTANCE:
+					continue
+
+				dmg = CENTRAL_EXPLOSION_DAMAGE-(CENTRAL_EXPLOSION_DAMAGE/MAX_BOMB_DAMAGE_DISTANCE)*dist
+				player.set_hp(player.hp-dmg, kill_type=GRENADE_KILL)
 
 	class csConnection(connection):
 		start_position = (0,0,0)
